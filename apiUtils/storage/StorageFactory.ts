@@ -3,6 +3,7 @@ import { StorageInterface } from './StorageInterface';
 import { SupabaseStorage } from './SupabaseStorage';
 import { GCSStorage } from './GCSStorage';
 import { S3Storage } from './S3Storage';
+import { S3IamStorage } from './S3IamStorage';
 import { getLogger } from '../logger';
 
 const logger = getLogger('StorageFactory');
@@ -21,6 +22,8 @@ export class StorageFactory {
         StorageFactory.instance = new GCSStorage();
       } else if (storageType === 's3') {
         StorageFactory.instance = new S3Storage();
+      } else if (storageType === 's3-iam') {
+        StorageFactory.instance = new S3IamStorage();
       } else {
         logger.error('Unsupported storage type', { storageType });
         throw new Error('Unsupported storage type');

@@ -5,6 +5,7 @@ import {
   ListObjectsV2Command,
   PutObjectCommand,
   CopyObjectCommand,
+  S3ClientConfig,
 } from '@aws-sdk/client-s3';
 import { StorageInterface } from './StorageInterface';
 
@@ -16,20 +17,17 @@ export class S3IamStorage implements StorageInterface {
     if (!process.env.S3_BUCKET_NAME) {
       throw new Error('S3 bucket name not configured');
     }
-
-    const hasExplicitCredentials =
-      process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY;
-
-    this.client = new S3Client({
+    const config: S3ClientConfig = {
       region: process.env.S3_REGION ?? 'auto',
       endpoint: process.env.S3_ENDPOINT,
-      ...(hasExplicitCredentials && {
-        credentials: {
-          accessKeyId: process.env.S3_ACCESS_KEY_ID!,
-          secretAccessKey: process.env.S3_SECRET_ACCESS_KEY!,
-        },
-      }),
-    });
+    };
+    if (process.env.S3_ACCESS_KEY_ID && process.env.S3_SECRET_ACCESS_KEY) {
+      config.credentials = {
+        accessKeyId: process.env.S3_ACCESS_KEY_ID,
+        secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+      };
+    }
+    this.client = new S3Client(config);
     this.bucketName = process.env.S3_BUCKET_NAME;
   }
 

@@ -253,8 +253,9 @@ Currently, we support:
 - Local filesystem storage
 - Google Cloud Storage (gcs)
 - AWS S3 Compatible Storage (s3)
+- AWS S3 with IAM Credentials (s3-iam)
 
-More providers (S3, Azure, etc.) are welcome to be implemented by the community. The `StorageInterface` is quite simple and you can implement it for any blob storage service.
+More providers (Azure, etc.) are welcome to be implemented by the community. The `StorageInterface` is quite simple and you can implement it for any blob storage service.
 </details>
 
 <details>

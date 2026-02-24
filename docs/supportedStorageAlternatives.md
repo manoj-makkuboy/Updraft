@@ -41,6 +41,21 @@ S3_BUCKET_NAME=your-s3-bucket-name
 - Support all S3 compatible storage (AWS S3, Digital Ocean Spaces, Cloudflare R2, etc.)
 - Bucket should be created manually before starting the server
 
+### AWS S3 with IAM Credentials
+```env
+BLOB_STORAGE_TYPE=s3-iam
+S3_REGION=us-east-1
+S3_ENDPOINT=your-s3-endpoint
+S3_BUCKET_NAME=your-s3-bucket-name
+S3_ACCESS_KEY_ID=your-access-key-id     # optional
+S3_SECRET_ACCESS_KEY=your-secret-key    # optional
+```
+- Same S3 functionality but with optional access keys
+- When `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` are omitted, the AWS SDK resolves credentials automatically via the [default credential provider chain](https://docs.aws.amazon.com/sdk-for-javascript/v3/developer-guide/setting-credentials-node.html) (IAM roles, instance profiles, ECS task roles, EC2 metadata, SSO, etc.)
+- When access keys are provided, they are used explicitly (same behavior as the `s3` type)
+- Recommended for AWS-hosted deployments where IAM roles are available
+- Bucket should be created manually before starting the server
+
 ## Supported Database Providers
 Database configuration is managed via `DB_TYPE`.
 

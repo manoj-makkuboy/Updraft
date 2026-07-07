@@ -9,6 +9,7 @@ import { StorageFactory } from '../../apiUtils/storage/StorageFactory';
 import AdmZip from 'adm-zip';
 import { ZipHelper } from '../../apiUtils/helpers/ZipHelper';
 import { HashHelper } from '../../apiUtils/helpers/HashHelper';
+import { PrecomputedManifestHelper } from '../../apiUtils/helpers/PrecomputedManifestHelper';
 
 export const config = {
   api: {
@@ -55,6 +56,17 @@ export default async function uploadHandler(req: NextApiRequest, res: NextApiRes
     const updateId = HashHelper.convertSHA256HashToUUID(updateHash);
 
     const path = await storage.uploadFile(`${updatePath}/${timestamp}.zip`, zipContent);
+
+    // Precompute the manifest (asset hashes/keys, expo config) once at upload
+    // time so the manifest endpoint never has to download the full zip or
+    // re-hash assets per request. Non-fatal: on failure the manifest endpoint
+    // falls back to computing from the zip.
+    const updateBundlePath = `${updatePath}/${timestamp}`;
+    try {
+      await PrecomputedManifestHelper.precomputeAndStore(updateBundlePath, zipFolder);
+    } catch (precomputeError) {
+      console.error('Failed to precompute manifest (will fall back at serve time):', precomputeError);
+    }
 
     await DatabaseFactory.getDatabase().createRelease({
       path,

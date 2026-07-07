@@ -14,12 +14,18 @@ jest.mock('../apiUtils/helpers/UpdateHelper');
 jest.mock('../apiUtils/helpers/ZipHelper');
 jest.mock('../apiUtils/helpers/ConfigHelper');
 jest.mock('../apiUtils/helpers/HashHelper');
+jest.mock('../apiUtils/helpers/PrecomputedManifestHelper');
 jest.mock('../apiUtils/database/DatabaseFactory');
 jest.mock('form-data');
+
+import { PrecomputedManifestHelper } from '../apiUtils/helpers/PrecomputedManifestHelper';
 
 describe('Manifest API', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Default: no precomputed artifact, so the endpoint exercises the
+    // zip-based fallback path these tests assert against.
+    (PrecomputedManifestHelper.tryGet as jest.Mock).mockResolvedValue(null);
   });
 
   it('should return 405 for non-GET requests', async () => {
@@ -193,6 +199,154 @@ describe('Manifest API', () => {
       expect.any(String),
       expect.any(Object)
     );
+  });
+
+  it('should serve from precomputed manifest without touching the zip', async () => {
+    const mockRelease: Release = {
+      id: 'release-id',
+      runtimeVersion: '1.0.0',
+      path: 'path/to/update.zip',
+      timestamp: '2024-03-20T00:00:00Z',
+      commitHash: 'abc123',
+      commitMessage: 'Test commit',
+      updateId: 'different-update-id',
+    };
+
+    const mockDatabase = {
+      getLatestReleaseRecordForRuntimeVersion: jest.fn().mockResolvedValue(mockRelease),
+      getReleaseByPath: jest.fn().mockResolvedValue(mockRelease),
+      createTracking: jest.fn().mockResolvedValue(undefined),
+    } as unknown as DatabaseInterface;
+    (DatabaseFactory.getDatabase as jest.Mock).mockReturnValue(mockDatabase);
+
+    (UpdateHelper.getLatestUpdateBundlePathForRuntimeVersionAsync as jest.Mock).mockResolvedValue(
+      'path/to/update'
+    );
+
+    // A precomputed artifact exists — the fast path should be used.
+    (PrecomputedManifestHelper.tryGet as jest.Mock).mockResolvedValue({
+      version: 1,
+      createdAt: '2024-03-20T00:00:00Z',
+      isRollback: false,
+      platforms: {
+        ios: {
+          id: 'precomputed-update-id',
+          assets: [
+            {
+              hash: 'asset-hash',
+              key: 'asset-key',
+              fileExtension: '.png',
+              contentType: 'image/png',
+              filePath: 'assets/test.png',
+            },
+          ],
+          launchAsset: {
+            hash: 'bundle-hash',
+            key: 'bundle-key',
+            fileExtension: '.bundle',
+            contentType: 'application/javascript',
+            filePath: 'bundle.js',
+          },
+          expoConfig: { name: 'test-app' },
+        },
+      },
+    });
+
+    let capturedManifest: any = null;
+    const mockFormData = {
+      append: jest.fn((field: string, value: string) => {
+        if (field === 'manifest') capturedManifest = JSON.parse(value);
+      }),
+      getBoundary: jest.fn().mockReturnValue('boundary'),
+      getBuffer: jest.fn().mockReturnValue(Buffer.from('mock-form-data')),
+    };
+    (FormData as unknown as jest.Mock).mockImplementation(() => mockFormData);
+
+    process.env.HOST = 'https://cdn.example.com';
+
+    const { req, res } = createMocks({
+      method: 'GET',
+      headers: {
+        'expo-platform': 'ios',
+        'expo-runtime-version': '1.0.0',
+        'expo-protocol-version': '1',
+        'expo-current-update-id': 'current-update-id',
+      },
+    });
+
+    await manifestEndpoint(req, res);
+
+    expect(res._getStatusCode()).toBe(200);
+    // Zip must NOT be downloaded, and per-asset hashing must NOT run.
+    expect(ZipHelper.getZipFromStorage).not.toHaveBeenCalled();
+    expect(UpdateHelper.getMetadataAsync).not.toHaveBeenCalled();
+    expect(UpdateHelper.getAssetMetadataAsync).not.toHaveBeenCalled();
+    // Manifest is built from precomputed data, with URLs from the current HOST.
+    expect(capturedManifest.id).toBe('precomputed-update-id');
+    expect(capturedManifest.assets[0].url).toBe(
+      'https://cdn.example.com/api/assets?asset=assets/test.png&runtimeVersion=1.0.0&platform=ios'
+    );
+    expect(capturedManifest.launchAsset.url).toBe(
+      'https://cdn.example.com/api/assets?asset=bundle.js&runtimeVersion=1.0.0&platform=ios'
+    );
+    expect(mockDatabase.createTracking).toHaveBeenCalled();
+  });
+
+  it('should return NoUpdateAvailable via precomputed path when update id matches', async () => {
+    const mockDatabase = {
+      getLatestReleaseRecordForRuntimeVersion: jest.fn().mockResolvedValue(null),
+      getReleaseByPath: jest.fn().mockResolvedValue(null),
+      createTracking: jest.fn().mockResolvedValue(undefined),
+    } as unknown as DatabaseInterface;
+    (DatabaseFactory.getDatabase as jest.Mock).mockReturnValue(mockDatabase);
+
+    (UpdateHelper.getLatestUpdateBundlePathForRuntimeVersionAsync as jest.Mock).mockResolvedValue(
+      'path/to/update'
+    );
+
+    (PrecomputedManifestHelper.tryGet as jest.Mock).mockResolvedValue({
+      version: 1,
+      createdAt: '2024-03-20T00:00:00Z',
+      isRollback: false,
+      platforms: {
+        ios: {
+          id: 'matching-update-id',
+          assets: [],
+          launchAsset: {
+            hash: 'h',
+            key: 'k',
+            fileExtension: '.bundle',
+            contentType: 'application/javascript',
+            filePath: 'bundle.js',
+          },
+          expoConfig: {},
+        },
+      },
+    });
+
+    const mockFormData = {
+      append: jest.fn(),
+      getBoundary: jest.fn().mockReturnValue('boundary'),
+      getBuffer: jest.fn().mockReturnValue(Buffer.from('mock-form-data')),
+    };
+    (FormData as unknown as jest.Mock).mockImplementation(() => mockFormData);
+
+    const { req, res } = createMocks({
+      method: 'GET',
+      headers: {
+        'expo-platform': 'ios',
+        'expo-runtime-version': '1.0.0',
+        'expo-protocol-version': '1',
+        'expo-current-update-id': 'matching-update-id',
+      },
+    });
+
+    await manifestEndpoint(req, res);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(ZipHelper.getZipFromStorage).not.toHaveBeenCalled();
+    // Tracking should NOT run when there's no new update to download.
+    expect(mockDatabase.createTracking).not.toHaveBeenCalled();
   });
 
   it('should handle rollback update successfully', async () => {

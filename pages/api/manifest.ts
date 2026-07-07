@@ -8,6 +8,10 @@ import { DictionaryHelper } from '../../apiUtils/helpers/DictionaryHelper';
 import { HashHelper } from '../../apiUtils/helpers/HashHelper';
 import { UpdateHelper, NoUpdateAvailableError } from '../../apiUtils/helpers/UpdateHelper';
 import { ZipHelper } from '../../apiUtils/helpers/ZipHelper';
+import {
+  PrecomputedManifest,
+  PrecomputedManifestHelper,
+} from '../../apiUtils/helpers/PrecomputedManifestHelper';
 import { getLogger } from '../../apiUtils/logger';
 import { DatabaseFactory } from '../../apiUtils/database/DatabaseFactory';
 import moment from 'moment';
@@ -93,7 +97,13 @@ export default async function manifestEndpoint(req: NextApiRequest, res: NextApi
     return;
   }
 
-  const updateType = await getTypeOfUpdateAsync(updateBundlePath);
+  // Fast path: a manifest artifact precomputed at upload time lets us skip
+  // downloading the full update zip and re-hashing every asset per request.
+  // Falls back to zip-based computation when the artifact is absent (older
+  // releases) or unreadable.
+  const precomputed = await PrecomputedManifestHelper.tryGet(updateBundlePath);
+
+  const updateType = await getTypeOfUpdateAsync(updateBundlePath, precomputed);
 
   try {
     try {
@@ -105,7 +115,8 @@ export default async function manifestEndpoint(req: NextApiRequest, res: NextApi
           updateBundlePath,
           runtimeVersion,
           platform,
-          protocolVersion
+          protocolVersion,
+          precomputed
         );
       } else if (updateType === UpdateType.ROLLBACK) {
         logger.info('Rollback is available.');
@@ -131,10 +142,24 @@ enum UpdateType {
   ROLLBACK,
 }
 
-async function getTypeOfUpdateAsync(updateBundlePath: string): Promise<UpdateType> {
+async function getTypeOfUpdateAsync(
+  updateBundlePath: string,
+  precomputed: PrecomputedManifest | null
+): Promise<UpdateType> {
+  if (precomputed) {
+    return precomputed.isRollback ? UpdateType.ROLLBACK : UpdateType.NORMAL_UPDATE;
+  }
   const zip = await ZipHelper.getZipFromStorage(updateBundlePath);
   const hasRollback = zip.getEntry('rollback') !== null;
   return hasRollback ? UpdateType.ROLLBACK : UpdateType.NORMAL_UPDATE;
+}
+
+function buildAssetUrl(
+  filePath: string,
+  runtimeVersion: string,
+  platform: string
+): string {
+  return `${process.env.HOST}/api/assets?asset=${filePath}&runtimeVersion=${runtimeVersion}&platform=${platform}`;
 }
 
 async function putUpdateInResponseAsync(
@@ -143,55 +168,92 @@ async function putUpdateInResponseAsync(
   updateBundlePath: string,
   runtimeVersion: string,
   platform: string,
-  protocolVersion: number
+  protocolVersion: number,
+  precomputed: PrecomputedManifest | null
 ): Promise<void> {
   const currentUpdateId = req.headers['expo-current-update-id'];
-  const { metadataJson, createdAt, id } = await UpdateHelper.getMetadataAsync({
-    updateBundlePath,
-    runtimeVersion,
-  });
 
-  // NoUpdateAvailable directive only supported on protocol version 1
-  // for protocol version 0, serve most recent update as normal
-  if (currentUpdateId === HashHelper.convertSHA256HashToUUID(id) && protocolVersion === 1) {
-    logger.info('returning NoUpdateAvailable to client');
-    throw new NoUpdateAvailableError();
-  }
+  let manifest: any;
 
-  const expoConfig = await ConfigHelper.getExpoConfigAsync({
-    updateBundlePath,
-    runtimeVersion,
-  });
-  const platformSpecificMetadata = metadataJson.fileMetadata[platform];
-  const manifest = {
-    id: HashHelper.convertSHA256HashToUUID(id),
-    createdAt,
-    runtimeVersion,
-    assets: await Promise.all(
-      (platformSpecificMetadata.assets as any[]).map((asset: any) =>
-        UpdateHelper.getAssetMetadataAsync({
-          updateBundlePath,
-          filePath: asset.path,
-          ext: asset.ext,
-          runtimeVersion,
-          platform,
-          isLaunchAsset: false,
-        })
-      )
-    ),
-    launchAsset: await UpdateHelper.getAssetMetadataAsync({
-      updateBundlePath,
-      filePath: platformSpecificMetadata.bundle,
-      isLaunchAsset: true,
+  if (precomputed && precomputed.platforms[platform]) {
+    // Fast path — no zip download, no per-asset hashing. Asset URLs are built
+    // from the current HOST so the artifact stays valid if HOST changes.
+    const platformManifest = precomputed.platforms[platform];
+
+    if (currentUpdateId === platformManifest.id && protocolVersion === 1) {
+      logger.info('returning NoUpdateAvailable to client');
+      throw new NoUpdateAvailableError();
+    }
+
+    const toManifestAsset = (asset: (typeof platformManifest.assets)[number]) => ({
+      hash: asset.hash,
+      key: asset.key,
+      fileExtension: asset.fileExtension,
+      contentType: asset.contentType,
+      url: buildAssetUrl(asset.filePath, runtimeVersion, platform),
+    });
+
+    manifest = {
+      id: platformManifest.id,
+      createdAt: precomputed.createdAt,
       runtimeVersion,
-      platform,
-      ext: null,
-    }),
-    metadata: {},
-    extra: {
-      expoClient: expoConfig,
-    },
-  };
+      assets: platformManifest.assets.map(toManifestAsset),
+      launchAsset: toManifestAsset(platformManifest.launchAsset),
+      metadata: {},
+      extra: {
+        expoClient: platformManifest.expoConfig,
+      },
+    };
+  } else {
+    // Fallback — compute from the zip (older releases without a precomputed
+    // artifact). Same behavior as before this optimization.
+    const { metadataJson, createdAt, id } = await UpdateHelper.getMetadataAsync({
+      updateBundlePath,
+      runtimeVersion,
+    });
+
+    // NoUpdateAvailable directive only supported on protocol version 1
+    // for protocol version 0, serve most recent update as normal
+    if (currentUpdateId === HashHelper.convertSHA256HashToUUID(id) && protocolVersion === 1) {
+      logger.info('returning NoUpdateAvailable to client');
+      throw new NoUpdateAvailableError();
+    }
+
+    const expoConfig = await ConfigHelper.getExpoConfigAsync({
+      updateBundlePath,
+      runtimeVersion,
+    });
+    const platformSpecificMetadata = metadataJson.fileMetadata[platform];
+    manifest = {
+      id: HashHelper.convertSHA256HashToUUID(id),
+      createdAt,
+      runtimeVersion,
+      assets: await Promise.all(
+        (platformSpecificMetadata.assets as any[]).map((asset: any) =>
+          UpdateHelper.getAssetMetadataAsync({
+            updateBundlePath,
+            filePath: asset.path,
+            ext: asset.ext,
+            runtimeVersion,
+            platform,
+            isLaunchAsset: false,
+          })
+        )
+      ),
+      launchAsset: await UpdateHelper.getAssetMetadataAsync({
+        updateBundlePath,
+        filePath: platformSpecificMetadata.bundle,
+        isLaunchAsset: true,
+        runtimeVersion,
+        platform,
+        ext: null,
+      }),
+      metadata: {},
+      extra: {
+        expoClient: expoConfig,
+      },
+    };
+  }
 
   let signature = null;
   const expectSignatureHeader = req.headers['expo-expect-signature'];

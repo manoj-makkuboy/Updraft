@@ -1,203 +1,265 @@
-# Xavia OTA Updates Server 
+# Updraft — Self-Hosted OTA Updates for Expo
 
-[![Tests](https://github.com/xavia-io/xavia-ota/actions/workflows/test.yml/badge.svg)](https://github.com/xavia-io/xavia-ota/actions/workflows/test.yml)
-[![Docker Pulls](https://img.shields.io/docker/pulls/xaviaio/xavia-ota)](https://hub.docker.com/r/xaviaio/xavia-ota)
-[![Docker Image Size](https://img.shields.io/docker/image-size/xaviaio/xavia-ota/latest)](https://hub.docker.com/r/xaviaio/xavia-ota)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A self-hosted Over-The-Air (OTA) updates server for Expo/RN applications that gives you complete control over your app's update distribution. Built with Next.js and TypeScript, it implements the expo-updates protocol while providing additional features for enterprise use.
+> **Hard fork of [xavia-io/xavia-ota](https://github.com/xavia-io/xavia-ota)** — batteries included.  
+> Updraft keeps everything that made Xavia OTA great and layers in the production hardening, performance optimizations, and operational features that large-scale deployments need.
 
-## Table of Contents <!-- omit in toc -->
+A self-hosted Over-The-Air (OTA) update server for Expo / React Native applications. Built with Next.js and TypeScript, it implements the full [expo-updates protocol](https://docs.expo.dev/archive/technical-specs/expo-updates-0/) while adding the features you actually need when running this in production.
 
+---
 
- 
-- [Xavia OTA Updates Server](#xavia-ota-updates-server)
-  - [Overview](#overview)
-  - [Key Features](#key-features)
-  - [Deployment](#deployment)
-  - [Local Development](#local-development)
-  - [Code Signing](#code-signing)
-  - [React Native app configuration](#react-native-app-configuration)
-  - [Publish App Update](#publish-app-update)
-  - [Rollbacks](#rollbacks)
-  - [Admin Dashboard](#admin-dashboard)
-  - [Technical Stack](#technical-stack)
-    - [Core Technologies](#core-technologies)
-    - [Storage Options](#storage-options)
-    - [Development Tools](#development-tools)
-  - [Community Contributions](#community-contributions)
-  - [FAQ](#faq)
-    - [How is this different from EAS Updates?](#how-is-this-different-from-eas-updates)
-    - [How is this different from self-hosted CodePush server?](#how-is-this-different-from-self-hosted-codepush-server)
-    - [Can I use this with bare React Native apps?](#can-i-use-this-with-bare-react-native-apps)
-    - [What blob storage options are supported?](#what-blob-storage-options-are-supported)
-    - [What database options are supported?](#what-database-options-are-supported)
-    - [Is this production-ready?](#is-this-production-ready)
-  - [License](#license)
+## What's different from Xavia OTA
 
+| | Xavia OTA (upstream) | Updraft (this fork) |
+|---|---|---|
+| Manifest serving | ~3s per request (full zip download + per-asset re-hashing on every request) | **Single-digit ms** — precomputed at upload time, served from a tiny JSON artifact |
+| Existing releases | Served from zip on every request | Backfill endpoint generates precomputed artifacts for all existing releases in one call |
+| User access management | Single shared `UPLOAD_KEY` | *(coming soon)* per-user API keys with role-based access |
+| Maintenance | Upstream appears unmaintained | Actively maintained |
+
+### Precomputed manifest optimization
+
+Every manifest request used to download the entire update zip (~tens of MB from S3/blob storage), open it, and re-hash every asset — just to produce the same JSON it produced for every previous request. The CPU stayed near 0% the whole time because the server was simply waiting on network I/O. Adding more replicas or a bigger database had no effect because the bottleneck was this redundant work, not capacity.
+
+Updraft eliminates this: at upload time, it does that work once and stores the result as a tiny `.manifest.json` artifact next to the zip. On every subsequent manifest request, it downloads that artifact (a few KB) instead of the full zip, assembles the response, and returns it. The fallback to zip-based computation is preserved automatically for any release that doesn't have a precomputed artifact yet.
+
+See [docs/PRECOMPUTED_MANIFEST.md](./docs/PRECOMPUTED_MANIFEST.md) for a detailed explanation.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Deployment](#deployment)
+- [Local Development](#local-development)
+- [Backfill Existing Releases](#backfill-existing-releases)
+- [Code Signing](#code-signing)
+- [React Native App Configuration](#react-native-app-configuration)
+- [Publish App Update](#publish-app-update)
+- [Rollbacks](#rollbacks)
+- [Admin Dashboard](#admin-dashboard)
+- [Technical Stack](#technical-stack)
+- [FAQ](#faq)
+- [License](#license)
+
+---
 
 ## Overview
 
-This system provides a robust OTA update infrastructure with these key components:
+Updraft provides a robust OTA update infrastructure built around four components:
 
-1. **Updates Server**: A Next.js application handling OTA update distribution.
-2. **Admin Dashboard**: Web interface for update management.
-3. **Blob Storage**: Flexible and extensible blob storage support.
-4. **Database Layer**: Supports PostgreSQL for tracking (no sensitive or personal data is collected) and insights.
+1. **Updates Server** — Next.js application handling OTA update distribution with the precomputed manifest fast path.
+2. **Admin Dashboard** — Web interface for release management, rollbacks, and download analytics.
+3. **Blob Storage** — Pluggable interface: AWS S3, S3-compatible, Google Cloud Storage, Supabase, or local filesystem.
+4. **Database Layer** — PostgreSQL for release tracking, download metrics, and version management. No sensitive or personal data is collected.
+
+---
 
 ## Key Features
 
-- ✨ Full compatibility with `expo-updates` protocol - Seamlessly integrates with Expo applications using the standard update protocol.
+- **Full expo-updates protocol compatibility** — drop-in replacement for EAS Updates; no app-side changes beyond pointing `updates.url` at your server.
+- **Precomputed manifests** — manifest serving in single-digit milliseconds; no per-request zip downloads or asset re-hashing.
+- **Backfill endpoint** — one API call generates precomputed artifacts for all existing releases.
+- **Runtime version management and rollbacks** — roll forward or back to any previous release from the admin dashboard.
+- **Multiple blob storage backends** — S3, S3-compatible, GCS, Supabase, local filesystem.
+- **Release history tracking** — every release carries a timestamp, commit hash, and commit message.
+- **Download analytics** — per-platform, per-release download counts.
+- **Docker-first deployment** — single `docker-compose up` gets you running.
+- **Code signing** — optional RSA key-pair signing for update verification on the client.
 
-- 🔄 Runtime version management and rollback support - Manage different app versions and quickly rollback to previous versions if issues arise.
-
-- 🐳 Docker support for easy deployment - Get up and running quickly with containerized deployment using Docker and Docker Compose.
-
-- 🗄️ Multiple blob storage backends:
-  Abstracted blob storage interface that allows you to plug in your own storage solutions. Implement the simple interface to integrate with any storage backend of your choice.
-
-- 📈 Release history tracking - Keep track of all your releases with detailed metadata including timestamps, commit hashes and commit messages.
-
-- 📊 Insights - Get insights into your update distribution with detailed analytics.
-
+---
 
 ## Deployment
 
-The easiest way to deploy Xavia OTA is using our public Docker image. The image is available on Docker Hub at [xaviaio/xavia-ota](https://hub.docker.com/repository/docker/xaviaio/xavia-ota).
+### Docker Compose (recommended)
 
-1. You can copy the `docker-compose.yml` file in the `containers/prod` folder and set the environment variables properly. 
-2. Or if you like the longer route, you can pull the image and run it manually
+Copy the production compose file and configure your environment:
 
-    ` docker run -d -p 3000:3000 xaviaio/xavia-ota -e HOST=http://localhost:3000 ...`
+```bash
+cp containers/prod/docker-compose.yml ./docker-compose.yml
+# Edit docker-compose.yml and fill in the environment variables below
+docker compose up -d
+```
 
-### Load test your deployment setup
-Check [this](./docs/laod_testing.md) on how to run load testing for your OTA server in your deployment infrastructure.
+### Required environment variables
+
+```env
+HOST=https://your-public-domain.com      # Full public URL — used to build asset download URLs
+BLOB_STORAGE_TYPE=s3-iam                 # s3 | s3-iam | gcs | supabase | local
+DB_TYPE=postgres
+ADMIN_PASSWORD=your-admin-password
+UPLOAD_KEY=your-secret-upload-key
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=releases_db
+POSTGRES_HOST=your-db-host
+POSTGRES_PORT=5432
+
+# For S3 / S3-IAM
+S3_BUCKET_NAME=your-bucket
+AWS_REGION=us-east-1
+# For s3 (explicit keys, not IAM role):
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+
+# Optional: code signing
+# PRIVATE_KEY_BASE_64=<base64-encoded RSA private key>
+```
+
+> **`HOST` must be your public-facing URL.** If it is wrong (e.g. `localhost:3000` in a cloud deployment), the asset URLs embedded in every manifest will be unreachable from devices.
+
+### AWS ECS / Fargate
+
+See [docs/aws-deployment.md](./docs/aws-deployment.md) for a step-by-step guide covering ECR, ECS Fargate, Aurora Serverless v2, RDS Proxy, ALB, and CloudFront.
+
+### Load testing your deployment
+
+See [docs/load_testing.md](./docs/load_testing.md) for k6 scripts and guidance on interpreting results. Run the load test from a machine in the same region as your server — a laptop connecting across continents will saturate the client's network before it stresses the server.
+
+---
 
 ## Local Development
 
-1. Clone the repository and install dependencies:
-   ```bash
-   git clone git@github.com:xavia-io/xavia-ota.git
-   cd xavia-ota
-   npm install
-   ```
-
-2. Copy the example local env file:
-   ```bash
-   cp .env.example.local .env.local
-   ```
-
-3. Configure your environment variables in `.env.local`. The minimal required configuration is:
-   ```env
-   HOST=http://localhost:3000
-   BLOB_STORAGE_TYPE=local
-   DB_TYPE=postgres
-   ADMIN_PASSWORD=your-admin-password
-   PRIVATE_KEY_BASE_64=your-base64-encoded-private-key
-   UPLOAD_KEY=abc123def456
-   POSTGRES_USER=postgres
-   POSTGRES_PASSWORD=postgres
-   POSTGRES_DB=releases_db
-   POSTGRES_HOST=localhost
-   POSTGRES_PORT=5432
-   ```
-
-4. Start the development server:
-   ```bash
-   npm run dev
-   ```
+```bash
+git clone https://github.com/your-org/updraft.git
+cd updraft
+npm install
+cp .env.example.local .env.local
+# Fill in .env.local
+npm run dev
+```
 
 The server and admin dashboard will be available at `http://localhost:3000`.
 
+See [docs/supportedStorageAlternatives.md](./docs/supportedStorageAlternatives.md) for full storage and database configuration options.
 
-Refer to [Storage & Database Configuration](./docs/supportedStorageAlternatives.md) for more configuration options.
+---
 
+## Backfill Existing Releases
 
-## Code Signing 
+Releases uploaded before the precomputed manifest feature existed will continue to work via the fallback path (zip download per request). To generate precomputed artifacts for all of them in one go, call the backfill endpoint from inside your network (it requires your `UPLOAD_KEY`):
 
-The code signing is done using a private key. The private key is used to sign the updates. The client uses a certificate to verify the signature of the update.
+```bash
+curl -X POST https://your-domain.com/api/backfill-manifests \
+  -H "Content-Type: application/json" \
+  -d '{"uploadKey": "your-upload-key"}'
+```
 
-To read more about code signing for your app and how you can generate the secrets, please refer to the [expo code signing documentation](https://docs.expo.dev/eas-update/code-signing/).
+The endpoint iterates every release in the database, skips any that already have a precomputed artifact, and generates the missing ones. It returns a summary of how many were processed, skipped, and failed. Runs in the background if you add `"async": true` to the body.
 
-## React Native app configuration 
+On ECS / Fargate the task role has S3 access, so no additional credentials are needed.
 
-To use the OTA updates in your React Native app, please refer to the [expo-updates configuration](https://docs.expo.dev/versions/latest/sdk/updates/).
+---
 
-⚠️ The `updates.url` parameter in the [app config](https://docs.expo.dev/workflow/configuration) should be set to `https://your-domain-name/api/manifest`. Notice the `/api/manifest` path. Otherwise, you will get the HTML page. ⚠️
-See docs on the `updates.url` parameter [here](https://docs.expo.dev/versions/latest/config/app/#url).
+## Code Signing
+
+Code signing uses an RSA private key to sign updates; clients verify with the corresponding certificate. To generate keys:
+
+```bash
+# Generate private key
+openssl genrsa -out private-key.pem 2048
+# Export as base64 for the env var
+base64 -i private-key.pem | tr -d '\n'
+```
+
+Refer to the [Expo code signing documentation](https://docs.expo.dev/eas-update/code-signing/) for the client-side setup.
+
+---
+
+## React Native App Configuration
+
+Point `expo-updates` at your server in `app.json` / `app.config.js`:
+
+```json
+{
+  "expo": {
+    "updates": {
+      "url": "https://your-domain.com/api/manifest"
+    },
+    "runtimeVersion": "1.0.0"
+  }
+}
+```
+
+> ⚠️ The URL must end in `/api/manifest`. Pointing it at the root returns the admin dashboard HTML and the update check will silently fail.
+
+See the [expo-updates SDK docs](https://docs.expo.dev/versions/latest/sdk/updates/) for full configuration options.
+
+---
 
 ## Publish App Update
 
-We provide a simple script `build-and-publish-app-release.sh` in the `scripts` folder to build and publish your app updates, copy it to your RN app root folder and run it from there:
+Use the provided script from your React Native app root:
 
-```shell
-./build-and-publish-app-release.sh <runtimeVersion> <your-xavia-ota-url> <uploadKey>
+```bash
+# Copy the script once
+cp <updraft-repo>/scripts/build-and-publish-app-release.sh .
+chmod +x build-and-publish-app-release.sh
+
+# Publish
+./build-and-publish-app-release.sh <runtimeVersion> <server-url> <uploadKey>
 ```
-
-> **Important**: Make sure the runtime version is the same as the one you use in your expo-updates config in your app. 
-> Refer to the [React Native app configuration](#react-native-app-configuration) for more information.
 
 Example:
-```shell
-./build-and-publish-app-release.sh 1.0.0 http://localhost:3000 abc123def456
+```bash
+./build-and-publish-app-release.sh 1.0.0 https://your-domain.com abc123def456
 ```
 
-This script will:
-1. Build your app using `expo export`
-2. Package the update with metadata
-3. Upload it to your Xavia OTA server
+The script will:
+1. Run `expo export` to build the JS bundle and assets.
+2. Package the output with metadata into a zip.
+3. Prompt you to confirm the commit hash and message.
+4. Upload to your Updraft server.
 
-The script will show you the commit hash and message for confirmation before uploading.
+> The `runtimeVersion` must match the value in your `app.json`. Mismatched runtime versions will result in no update being served.
 
-> **Note**: Make sure the script is executable (`chmod +x scripts/build-and-publish-app-release.sh`)
+---
 
 ## Rollbacks
 
-We use a simple rollback-forward mechanism. When a new update is published, it becomes the "active" update and the previous update, let's call it "inactive" update, is still available in your server but not served to the clients. 
+Updraft uses a roll-forward rollback strategy: clicking "Rollback" in the admin dashboard copies the target release with a new timestamp, making it the current active release. No data is deleted. The previous active release becomes inactive but remains in storage and can be rolled back to again.
 
-If anything goes wrong with the active update, and you want to rollback to the inactive one, you can simply click a button in the admin dashboard. 
-
-What happens behind the scenes is that we copy the inactive update with a new timestamp and push it to the front of the queue of updates, effectively making it the new active update.
+---
 
 ## Admin Dashboard
 
-For more information about the admin dashboard, please refer to the [Admin Dashboard](./docs/adminPortal.md) documentation.
+Access the admin dashboard at `https://your-domain.com`. Log in with your `ADMIN_PASSWORD`.
+
+From the dashboard you can:
+- View all releases with commit metadata and download counts.
+- Promote any previous release to active (rollback).
+- Monitor per-platform download analytics.
+
+See [docs/adminPortal.md](./docs/adminPortal.md) for screenshots and a full feature walkthrough.
+
+---
 
 ## Technical Stack
 
-### Core Technologies
+### Core
 - **Framework**: Next.js 15+
 - **Language**: TypeScript
-- **Database**: PostgreSQL 14
-- **UI Library**: Chakra UI (v2) and Tailwind CSS for styling
+- **Database**: PostgreSQL 14+
+- **UI**: Chakra UI v2 + Tailwind CSS
 - **Container**: Docker & Docker Compose
 
-### Storage Options
-- Local filesystem storage for development
-- Supabase storage for production deployments
-  
-Read more about supported blob storage and database options [here](./docs/supportedStorageAlternatives.md).
+### Storage backends
+| Backend | `BLOB_STORAGE_TYPE` value | Notes |
+|---|---|---|
+| AWS S3 (IAM role) | `s3-iam` | Recommended for ECS / EC2 |
+| AWS S3 (explicit keys) | `s3` | For non-AWS environments |
+| Google Cloud Storage | `gcs` | |
+| Supabase Storage | `supabase` | |
+| Local filesystem | `local` | Development only |
 
-
-
-### Development Tools
+### Development tools
+- Jest for unit + integration tests
 - ESLint for code quality
-- Jest for testing
 - Docker for containerization
-- Make for development scripts
 
-
-## Community Contributions
-
-We welcome and appreciate contributions from the community to enhance and expand the capabilities of the Xavia OTA System. Here are some areas where you can contribute:
-
-- **New Storage Backends**: Implement additional storage backends to provide more options for users.
-- **Database Support**: Add support for other databases like MySQL, MongoDB, etc.
-- **UI Enhancements**: Improve the Admin Dashboard with new features and better user experience.
-- **Documentation**: Help us improve the documentation to make it easier for others to get started and use the system.
-- **Bug Fixes and Improvements**: Identify and fix bugs, and suggest improvements to the existing codebase.
-
-Feel free to fork the repository, make your changes, and submit a pull request. We look forward to your contributions!
+---
 
 ## FAQ
 
@@ -206,20 +268,32 @@ Feel free to fork the repository, make your changes, and submit a pull request. 
 
 ### How is this different from EAS Updates?
 </summary>
-Xavia OTA is a free, self-hosted alternative to EAS Updates. While EAS Updates is a managed service that costs massively for growing apps, Xavia OTA can be deployed anywhere and is completely free. Both implement the same expo-updates protocol.
+
+EAS Updates is a managed service with per-update pricing that becomes expensive at scale. Updraft is self-hosted and free. Both implement the same expo-updates protocol, so switching is a one-line change to `updates.url` in your app config.
 </details>
 
 <details>
 <summary>
 
-### How is this different from self-hosted CodePush server?
+### How is this different from the original Xavia OTA?
 </summary>
 
-The self-hosted CodePush server is tightly coupled with the Azure ecosystem and requires Azure App Service & Azure Blob Storage for production deployments and an Azurite emulator for local development. 
+Updraft is a hard fork of [xavia-io/xavia-ota](https://github.com/xavia-io/xavia-ota). The upstream project appears to be unmaintained. Updraft adds:
 
+- **Precomputed manifests**: eliminates the per-request S3 zip download that caused ~3s TTFB under load.
+- **Backfill endpoint**: retroactively generates precomputed artifacts for existing releases.
+- Active maintenance and production-hardening focus.
 
-Xavia OTA, on the other hand, is completely independent and can be deployed anywhere - whether that's your own infrastructure, AWS, GCP, or any other cloud provider. Additionally, Xavia OTA implements the expo-updates protocol which is more widely adopted in the React Native ecosystem compared to CodePush's protocol.
+The expo-updates protocol implementation and the storage/database abstractions are inherited from Xavia OTA.
+</details>
 
+<details>
+<summary>
+
+### How is this different from self-hosted CodePush?
+</summary>
+
+The self-hosted CodePush server is tightly coupled to Azure (App Service + Azure Blob Storage + Azurite for local dev). Updraft is cloud-agnostic — deploy on AWS, GCP, any VPS, or your own hardware. Updraft also implements the expo-updates protocol which is more widely adopted in the Expo / React Native ecosystem than CodePush's protocol.
 </details>
 
 <details>
@@ -228,18 +302,7 @@ Xavia OTA, on the other hand, is completely independent and can be deployed anyw
 ### Can I use this with bare React Native apps?
 </summary>
 
-This a "yes and no" type of answer. While you can use Xavia OTA with bare React Native apps, you need to configure expo-updates in your app and point it to your Xavia OTA server. Unfortunately, that means you will also need to add a small footprint of the Expo framework to your app as well.
-
-So the "yes" part is for the ability to use Xavia OTA updates with bare React Native apps that haven't been created with Expo, and the "no" part is for the fact that you will need to ship the Expo SDK with your app from now on. The good thing is that you will not need to use any managed Expo services like EAS Build or EAS Submit to use expo-updates in your RN app with Xavia OTA.
-
-> [!NOTE]  This is fun!
-> This problem might be worth working on by the community. The expo-updates protocol is designed to be agnostic to the underlying SDK that you use to build your app. So it should work with any RN app - no matter how bare-bones it is. The only client-side implementation for expo-updates protocol that we know of is the one made by Expo themselves. Xavia OTA implements the expo-updates protocol on the server side and we would love to see the same on the client side. If you are interested in working on this, here are some pointers:
-
-
-1. Expo-updates [protocol specification](https://docs.expo.dev/archive/technical-specs/expo-updates-0/)
-2. Expo-updates [client implementation](https://github.com/expo/expo/tree/main/packages/expo-updates)
-
-
+Yes, with a caveat. You need to install `expo-updates` in your app and point it at your Updraft server. That brings a small Expo footprint into your app — you won't need EAS Build or EAS Submit, but `expo-updates` itself is an Expo package. The server side is fully protocol-compliant and works with any client that speaks the expo-updates protocol.
 </details>
 
 <details>
@@ -248,14 +311,13 @@ So the "yes" part is for the ability to use Xavia OTA updates with bare React Na
 ### What blob storage options are supported?
 </summary>
 
-Currently, we support:
-- Supabase Storage
-- Local filesystem storage
-- Google Cloud Storage (gcs)
-- AWS S3 Compatible Storage (s3)
-- AWS S3 with IAM Credentials (s3-iam)
+- AWS S3 with IAM role (`s3-iam`) — recommended for ECS/EC2
+- AWS S3 with explicit credentials (`s3`)
+- Google Cloud Storage (`gcs`)
+- Supabase Storage (`supabase`)
+- Local filesystem (`local`) — development only
 
-More providers (Azure, etc.) are welcome to be implemented by the community. The `StorageInterface` is quite simple and you can implement it for any blob storage service.
+Additional backends can be added by implementing the `StorageInterface`.
 </details>
 
 <details>
@@ -264,10 +326,7 @@ More providers (Azure, etc.) are welcome to be implemented by the community. The
 ### What database options are supported?
 </summary>
 
-Currently, we support:
-- PostgreSQL
-
-More providers (MySQL, MongoDB, etc.) are welcome to be implemented by the community. The `DatabaseInterface` is quite simple and you can implement it for any database service.
+PostgreSQL only, for now. The `DatabaseInterface` is straightforward to implement for other databases — contributions welcome.
 </details>
 
 <details>
@@ -276,9 +335,15 @@ More providers (MySQL, MongoDB, etc.) are welcome to be implemented by the commu
 ### Is this production-ready?
 </summary>
 
-Yes! We're using it in production for our own apps. The server implements the complete expo-updates protocol and includes features like release management and rollbacks and simple tracking metrics.
+Yes. The expo-updates protocol implementation is inherited from Xavia OTA (which was production-tested) and Updraft's additions (precomputed manifests, backfill) are covered by the existing test suite. The performance optimization has been load-tested on AWS ECS Fargate + Aurora Serverless v2 + CloudFront.
 </details>
 
+---
 
 ## License
-This project is licensed under the MIT License. See the [LICENSE](./LICENSE) file for details.
+
+MIT — see [LICENSE](./LICENSE).
+
+---
+
+*Forked from [xavia-io/xavia-ota](https://github.com/xavia-io/xavia-ota). Original work © xavia-io contributors, licensed MIT.*

@@ -18,6 +18,19 @@ import moment from 'moment';
 
 const logger = getLogger('manifest');
 
+// Manifest and NoUpdateAvailable responses are fully determined by the expo-*
+// request headers (platform, runtime-version, current-update-id,
+// protocol-version, expect-signature). As long as the CloudFront cache key
+// includes those headers, a shared CDN can safely serve one origin computation
+// to the whole fleet during an update blast. `max-age=0` keeps the client
+// (phone) always revalidating so a new release is picked up immediately;
+// `s-maxage` lets CloudFront absorb the herd for a short window.
+//
+// NOTE: rollback responses intentionally stay `private` — they additionally
+// vary by expo-embedded-update-id, which is NOT part of the CDN cache key, so
+// caching them could serve the wrong directive.
+const MANIFEST_CACHE_CONTROL = 'public, max-age=0, s-maxage=30, stale-while-revalidate=60';
+
 export default async function manifestEndpoint(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
     res.statusCode = 405;
@@ -297,7 +310,7 @@ async function putUpdateInResponseAsync(
   res.statusCode = 200;
   res.setHeader('expo-protocol-version', protocolVersion);
   res.setHeader('expo-sfv-version', 0);
-  res.setHeader('cache-control', 'private, max-age=0');
+  res.setHeader('cache-control', MANIFEST_CACHE_CONTROL);
   res.setHeader('content-type', `multipart/mixed; boundary=${form.getBoundary()}`);
   res.write(form.getBuffer());
   res.end();
@@ -421,7 +434,7 @@ async function putNoUpdateAvailableInResponseAsync(
   res.statusCode = 200;
   res.setHeader('expo-protocol-version', 1);
   res.setHeader('expo-sfv-version', 0);
-  res.setHeader('cache-control', 'private, max-age=0');
+  res.setHeader('cache-control', MANIFEST_CACHE_CONTROL);
   res.setHeader('content-type', `multipart/mixed; boundary=${form.getBoundary()}`);
   res.write(form.getBuffer());
   res.end();

@@ -14,6 +14,7 @@ import {
 } from '../../apiUtils/helpers/PrecomputedManifestHelper';
 import { getLogger } from '../../apiUtils/logger';
 import { DatabaseFactory } from '../../apiUtils/database/DatabaseFactory';
+import { Release } from '../../apiUtils/database/DatabaseInterface';
 import moment from 'moment';
 
 const logger = getLogger('manifest');
@@ -75,8 +76,20 @@ export default async function manifestEndpoint(req: NextApiRequest, res: NextApi
     return;
   }
 
-  const database = DatabaseFactory.getDatabase();
-  const releaseRecord = await database.getLatestReleaseRecordForRuntimeVersion(runtimeVersion);
+  // This lookup is only a fast path for "the client already has the latest
+  // update". If the database is unreachable we can still answer correctly from
+  // storage further down, so a failure here must not fail the request — it
+  // previously escaped the handler and Next.js turned it into a 500.
+  let releaseRecord: Release | null = null;
+  try {
+    const database = DatabaseFactory.getDatabase();
+    releaseRecord = await database.getLatestReleaseRecordForRuntimeVersion(runtimeVersion);
+  } catch (error) {
+    logger.error('Failed to look up the latest release; falling through to storage', {
+      error,
+      runtimeVersion,
+    });
+  }
 
   if (releaseRecord) {
     const updateId = releaseRecord.updateId;
@@ -315,16 +328,25 @@ async function putUpdateInResponseAsync(
   res.write(form.getBuffer());
   res.end();
 
-  const database = DatabaseFactory.getDatabase();
-  const release = await database.getReleaseByPath(updateBundlePath + '.zip');
+  // Download tracking is best-effort bookkeeping and deliberately runs *after*
+  // res.end(), so there is no response left to fail and nothing to report to
+  // the client. But an unhandled rejection here would terminate the Node
+  // process (Node 18's default), turning a bookkeeping blip into dropped
+  // in-flight requests and an ECS task restart. Swallow and log instead.
+  try {
+    const database = DatabaseFactory.getDatabase();
+    const release = await database.getReleaseByPath(updateBundlePath + '.zip');
 
-  if (release) {
-    logger.info(`Tracking download for release.`, { releaseId: release.id });
-    await database.createTracking({
-      platform,
-      releaseId: release.id,
-      downloadTimestamp: moment().utc().toISOString(),
-    });
+    if (release) {
+      logger.info(`Tracking download for release.`, { releaseId: release.id });
+      await database.createTracking({
+        platform,
+        releaseId: release.id,
+        downloadTimestamp: moment().utc().toISOString(),
+      });
+    }
+  } catch (error) {
+    logger.error('Failed to record download tracking', { error, updateBundlePath });
   }
 }
 

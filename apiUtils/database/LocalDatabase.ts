@@ -2,6 +2,9 @@ import { Pool } from 'pg';
 
 import { DatabaseInterface, Release, Tracking, TrackingMetrics } from './DatabaseInterface';
 import { Tables } from './DatabaseFactory';
+import { getLogger } from '../logger';
+
+const logger = getLogger('PostgresDatabase');
 
 export class PostgresDatabase implements DatabaseInterface {
   private pool: Pool;
@@ -13,6 +16,23 @@ export class PostgresDatabase implements DatabaseInterface {
       database: process.env.POSTGRES_DB,
       host: process.env.POSTGRES_HOST,
       port: parseInt(process.env.POSTGRES_PORT ?? '5432', 10),
+
+      // Explicit bounds rather than pg's defaults. The important one is
+      // connectionTimeoutMillis: pg defaults it to 0, which means "wait
+      // forever" for a free connection. With the ALB idle timeout at 300s, a
+      // saturated pool would hang requests for five minutes instead of failing
+      // fast — so having *a* timeout matters more than the exact ceiling.
+      max: parseInt(process.env.POSTGRES_POOL_MAX ?? '10', 10),
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
+    });
+
+    // A Pool with no 'error' listener rethrows errors from *idle* clients as an
+    // uncaught exception, which terminates the Node process — e.g. when Aurora
+    // drops an idle connection during a Serverless v2 scaling event. Handling
+    // it here stops a routine disconnect from becoming an ECS task restart.
+    this.pool.on('error', (error) => {
+      logger.error('Unexpected error on idle Postgres client', { error });
     });
   }
   async getLatestReleaseRecordForRuntimeVersion(runtimeVersion: string): Promise<Release | null> {
